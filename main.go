@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	cache := service.NewLRUCache(3)
+	cache := service.NewLRUCache(10)
 
 	router := gin.Default()
 
