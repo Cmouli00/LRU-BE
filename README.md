@@ -14,6 +14,9 @@ For macOS:
   
   gvm use go1.18.7
 
+
+To start:
+
 go run .
 
 Listening and serving HTTP on :8080
