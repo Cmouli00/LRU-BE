@@ -1,25 +1,16 @@
 package service
 
 import (
-	"container/list"
+	"lru/resources"
 	"sync"
 	"time"
-
-	"lru/resources"
 )
-
-// CacheEntry represents an entry in the cache
-type CacheEntry struct {
-	key        string
-	value      interface{}
-	expiration time.Time
-}
 
 // LRUCache represents the LRU cache
 type LRUCache struct {
 	capacity int
-	cache    map[string]*list.Element
-	list     *list.List
+	cache    map[string]*Node
+	dll      DoublyLinkedList
 	mu       sync.Mutex
 }
 
@@ -27,8 +18,8 @@ type LRUCache struct {
 func NewLRUCache(capacity int) *LRUCache {
 	lruCache := &LRUCache{
 		capacity: capacity,
-		cache:    make(map[string]*list.Element),
-		list:     list.New(),
+		cache:    make(map[string]*Node),
+		dll:      NewDll(),
 	}
 	// Start the cleanup goroutine
 	go lruCache.cleanupExpiredEntries()
@@ -39,13 +30,12 @@ func NewLRUCache(capacity int) *LRUCache {
 func (c *LRUCache) Get(key string) (interface{}, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if element, ok := c.cache[key]; ok {
-		c.list.MoveToFront(element)
-		entry := element.Value.(*CacheEntry)
-		if time.Now().Before(entry.expiration) {
-			return entry.value, true
+	if node, ok := c.cache[key]; ok {
+		c.dll.MoveToFront(node)
+		if time.Now().Before(node.expiration) {
+			return node.value, true
 		}
-		c.delete(key)
+		c.deleteNode(node)
 	}
 	return nil, false
 }
@@ -60,22 +50,21 @@ func (c *LRUCache) Set(key string, value interface{}, expiration time.Duration) 
 	} else {
 		expire = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 	}
-	if element, ok := c.cache[key]; ok {
-		c.list.MoveToFront(element)
-		entry := element.Value.(*CacheEntry)
-		entry.value = value
-		entry.expiration = expire
+	if node, ok := c.cache[key]; ok {
+		node.value = value
+		node.expiration = expire
+		c.dll.MoveToFront(node)
 	} else {
-		if c.list.Len() >= c.capacity {
+		if len(c.cache) >= c.capacity {
 			c.evict()
 		}
-		entry := &CacheEntry{
+		node := &Node{
 			key:        key,
 			value:      value,
 			expiration: expire,
 		}
-		element := c.list.PushFront(entry)
-		c.cache[key] = element
+		c.dll.PushFront(node)
+		c.cache[key] = node
 	}
 }
 
@@ -83,39 +72,34 @@ func (c *LRUCache) Set(key string, value interface{}, expiration time.Duration) 
 func (c *LRUCache) Delete(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.delete(key)
+	if node, ok := c.cache[key]; ok {
+		c.deleteNode(node)
+	}
 }
 
-// delete removes the entry associated with the given key without locking
-func (c *LRUCache) delete(key string) {
-	if element, ok := c.cache[key]; ok {
-		c.list.Remove(element)
-		delete(c.cache, key)
-	}
+// deleteNode removes a node from the linked list and cache
+func (c *LRUCache) deleteNode(node *Node) {
+	c.dll.Remove(node)
+	delete(c.cache, node.key)
 }
 
 // evict removes the least recently used entry from the cache
 func (c *LRUCache) evict() {
-	if c.list.Len() > c.capacity {
-		element := c.list.Back()
-		if element != nil {
-			c.list.Remove(element)
-			entry := element.Value.(*CacheEntry)
-			delete(c.cache, entry.key)
-		}
+	node := c.dll.RemoveLast()
+	if node != nil {
+		delete(c.cache, node.key)
 	}
 }
 
 // cleanupExpiredEntries periodically removes expired entries from the cache
 func (c *LRUCache) cleanupExpiredEntries() {
 	for {
-		time.Sleep(time.Second) // adjust the interval as needed
+		time.Sleep(time.Second)
 		c.mu.Lock()
 		now := time.Now()
-		for element := c.list.Back(); element != nil; element = element.Prev() {
-			entry := element.Value.(*CacheEntry)
-			if now.After(entry.expiration) {
-				c.delete(entry.key)
+		for node := c.dll.(*Dll).tail; node != nil; node = node.prev {
+			if now.After(node.expiration) {
+				c.deleteNode(node)
 			} else {
 				break
 			}
@@ -124,19 +108,21 @@ func (c *LRUCache) cleanupExpiredEntries() {
 	}
 }
 
+// GetAll retrieves all non-expired entries from the cache
 func (c *LRUCache) GetAll() []resources.GetAllResponse {
-	var items []resources.GetAllResponse
-	var item resources.GetAllResponse
-	for element := c.list.Front(); element != nil; element = element.Next() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-		entry := element.Value.(*CacheEntry)
-		if time.Now().Before(entry.expiration) {
-			item.Key = entry.key
-			item.Value = entry.value
-			item.Expiration = entry.expiration
+	var items []resources.GetAllResponse
+	for node := c.dll.(*Dll).head; node != nil; node = node.next {
+		if time.Now().Before(node.expiration) {
+			item := resources.GetAllResponse{
+				Key:        node.key,
+				Value:      node.value,
+				Expiration: node.expiration,
+			}
 			items = append(items, item)
 		}
 	}
-
 	return items
 }
